@@ -1,0 +1,12 @@
+certifi==2021.5.30
+charset-normalizer==2.0.4
+fiobank==3.0.0
+idna==3.2
+iso3166==1.0.1
+more-itertools==8.8.0
+pycountry==20.7.3
+pydantic==1.8.2
+requests==2.26.0
+schwifty==2021.6.1
+typing-extensions==3.10.0.1
+urllib3==1.26.6

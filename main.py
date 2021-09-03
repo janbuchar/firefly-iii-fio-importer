@@ -12,7 +12,27 @@ import requests
 from fiobank import FioBank
 from more_itertools import flatten
 from pydantic.json import pydantic_encoder
+from requests.models import Response
 from schwifty import IBAN
+
+
+class FireflyClient:
+    def __init__(self, url: str, token: str):
+        self.url = url
+        self.token = token
+
+    def request(self, method: str, url: str, data=None) -> Response:
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/json",
+        }
+
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+
+        return requests.request(
+            method, f"{self.url}/api/v1/{url}", data=data, headers=headers
+        )
 
 
 class TransactionType(str, Enum):
@@ -37,7 +57,9 @@ class Transaction:
     destination_name: Optional[str] = None
 
     @classmethod
-    def from_fio_data(cls, account: dict, transaction: dict):
+    def from_fio_data(
+        cls, account: dict, transaction: dict, firefly_client: FireflyClient
+    ):
         try:
             other_account_iban = str(
                 IBAN.generate(
@@ -46,7 +68,7 @@ class Transaction:
                     transaction["account_number"].replace("-", ""),
                 )
             )
-        except ValueError:
+        except (ValueError, AttributeError):
             other_account_iban = None
 
         type = (
@@ -63,14 +85,16 @@ class Transaction:
             notes=transaction["user_identification"],
             external_id=transaction["instruction_id"],
             source_id=find_account_id_by_iban(
+                firefly_client,
                 account["iban"]
                 if type == TransactionType.withdrawal
-                else other_account_iban
+                else other_account_iban,
             ),
             destination_id=find_account_id_by_iban(
+                firefly_client,
                 account["iban"]
                 if type == TransactionType.deposit
-                else other_account_iban
+                else other_account_iban,
             ),
         )
 
@@ -84,17 +108,8 @@ class Transaction:
 
 
 @lru_cache(maxsize=1)
-def fetch_accounts():
-    url = os.environ.get("FIREFLY_URL")
-    token = os.environ.get("FIREFLY_TOKEN")
-
-    response = requests.get(
-        f"{url}/api/v1/accounts",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-        },
-    )
+def fetch_accounts(client: FireflyClient):
+    response = client.request("get", "accounts")
 
     try:
         response.raise_for_status()
@@ -105,31 +120,30 @@ def fetch_accounts():
     return response.json()["data"]
 
 
-def find_account_id_by_iban(iban: Optional[str]) -> Optional[str]:
+def find_account_id_by_iban(
+    firefly_client: FireflyClient, iban: Optional[str]
+) -> Optional[str]:
     if iban is not None:
-        for account in fetch_accounts():
+        for account in fetch_accounts(firefly_client):
             if account["attributes"].get("iban") == iban:
                 return account["id"]
 
 
-def fetch_transactions(client: FioBank):
+def fetch_transactions(client: FioBank, since: Optional[date]):
     to_date = datetime.now(ZoneInfo(key="Europe/Prague"))
-    from_date = to_date - timedelta(days=3000)
+    from_date = (
+        (since - timedelta(days=1)) if since else (to_date - timedelta(days=3000))
+    )
     return client.period(from_date, to_date)
 
 
-def store_transactions(transactions: List[Transaction]) -> None:
-    url = os.environ.get("FIREFLY_URL")
-    token = os.environ.get("FIREFLY_TOKEN")
-
+def store_transactions(
+    firefly_client: FireflyClient, transactions: List[Transaction]
+) -> None:
     for transaction in transactions:
-        response = requests.post(
-            f"{url}/api/v1/transactions",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
+        response = firefly_client.request(
+            "post",
+            "transactions",
             data=json.dumps(
                 {
                     "error_if_duplicate_hash": True,
@@ -152,14 +166,42 @@ def store_transactions(transactions: List[Transaction]) -> None:
                 raise
 
 
+def fetch_last_transaction_date(firefly_client: FireflyClient) -> Optional[date]:
+    response = firefly_client.request("get", "transactions")
+
+    try:
+        response.raise_for_status()
+    except:
+        pprint(response.json())
+        raise
+
+    data = response.json()["data"]
+
+    if not data:
+        return None
+
+    return datetime.fromisoformat(
+        data[0]["attributes"]["transactions"][0]["date"]
+    ).date()
+
+
 def main():
-    token = os.environ.get("FIO_TOKEN")
-    client = FioBank(token)
-    account = client.info()
+    fio_token = os.environ["FIO_TOKEN"]
+    fio_client = FioBank(fio_token)
+
+    firefly_url = os.environ["FIREFLY_URL"]
+    firefly_token = os.environ["FIREFLY_TOKEN"]
+    firefly_client = FireflyClient(firefly_url, firefly_token)
+
+    last_sync_date = fetch_last_transaction_date(firefly_client)
+    account = fio_client.info()
+
     transactions = [
-        Transaction.from_fio_data(account, item) for item in fetch_transactions(client)
+        Transaction.from_fio_data(account, item, firefly_client)
+        for item in fetch_transactions(fio_client, last_sync_date)
     ]
-    store_transactions(transactions)
+
+    store_transactions(firefly_client, transactions)
 
 
 if __name__ == "__main__":

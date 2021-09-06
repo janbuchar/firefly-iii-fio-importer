@@ -168,8 +168,10 @@ def store_transactions(
                 raise
 
 
-def fetch_last_transaction_date(firefly_client: FireflyClient) -> Optional[date]:
-    response = firefly_client.request("get", "transactions")
+def fetch_last_transaction_date(
+    firefly_client: FireflyClient, account_id: str
+) -> Optional[date]:
+    response = firefly_client.request("get", f"accounts/{account_id}/transactions")
 
     try:
         response.raise_for_status()
@@ -201,8 +203,14 @@ def main():
     firefly_token = os.environ["FIREFLY_TOKEN"]
     firefly_client = FireflyClient(firefly_url, firefly_token)
 
-    last_sync_date = fetch_last_transaction_date(firefly_client)
     account = fio_client.info()
+    account_id = find_account_id_by_iban(firefly_client, account["iban"])
+
+    if account_id is None:
+        logging.error("Account not found")
+        sys.exit(1)
+
+    last_sync_date = fetch_last_transaction_date(firefly_client, account_id)
 
     transactions = [
         Transaction.from_fio_data(account, item, firefly_client)

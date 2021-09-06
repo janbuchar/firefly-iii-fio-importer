@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from enum import Enum
@@ -186,6 +188,12 @@ def fetch_last_transaction_date(firefly_client: FireflyClient) -> Optional[date]
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stderr,
+        format="%(asctime)s : %(levelname)s : %(message)s",
+    )
+
     fio_token = os.environ["FIO_TOKEN"]
     fio_client = FioBank(fio_token)
 
@@ -200,8 +208,10 @@ def main():
         Transaction.from_fio_data(account, item, firefly_client)
         for item in fetch_transactions(fio_client, last_sync_date)
     ]
+    logging.info(f"Fetched {len(transactions)} transactions")
 
     store_transactions(firefly_client, transactions)
+    logging.info("Import complete")
 
 
 if __name__ == "__main__":

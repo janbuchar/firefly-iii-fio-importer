@@ -53,8 +53,8 @@ class Transaction:
     description: str
     notes: str
     external_id: int
-    source_id: Optional[str]
-    destination_id: Optional[str]
+    source_id: Optional[str] = None
+    destination_id: Optional[str] = None
     source_name: Optional[str] = None
     destination_name: Optional[str] = None
 
@@ -70,43 +70,83 @@ class Transaction:
                     transaction["account_number"].replace("-", ""),
                 )
             )
+            other_account_data = find_account_by_iban(
+                firefly_client, other_account_iban
+            )
         except (ValueError, AttributeError):
-            other_account_iban = None
+            other_account_data = None
+
+        account_data = find_account_by_iban(firefly_client, account["iban"])
 
         type = (
-            TransactionType.withdrawal
+            TransactionType.transfer
+            if other_account_data is not None
+            and other_account_data.type == AccountType.asset
+            else TransactionType.withdrawal
             if transaction["amount"] < 0
             else TransactionType.deposit
         )
+
+        if type == TransactionType.transfer:
+            pprint(transaction)
 
         result = cls(
             type=type,
             date=transaction["date"],
             amount=abs(transaction["amount"]),
-            description=transaction["recipient_message"],
-            notes=transaction["user_identification"],
+            description=transaction.get("recipient_message") or "-",
+            notes=transaction.get("user_identification") or "-",
             external_id=transaction["instruction_id"],
-            source_id=find_account_id_by_iban(
-                firefly_client,
-                account["iban"]
-                if type == TransactionType.withdrawal
-                else other_account_iban,
-            ),
-            destination_id=find_account_id_by_iban(
-                firefly_client,
-                account["iban"]
-                if type == TransactionType.deposit
-                else other_account_iban,
-            ),
         )
 
         if result.type == TransactionType.withdrawal:
             result.destination_name = transaction["account_name"]
 
+            if account_data is not None:
+                result.source_id = account_data.id
+
+            if other_account_data is not None:
+                result.destination_id = other_account_data.id
+
         if result.type == TransactionType.deposit:
             result.source_name = transaction["account_name"]
 
+            if other_account_data is not None:
+                result.source_id = other_account_data.id
+
+            if account_data is not None:
+                result.destination_id = account_data.id
+
+        if result.type == TransactionType.transfer:
+            if transaction["amount"] > 0:
+                if account_data is not None:
+                    result.destination_id = account_data.id
+
+                if other_account_data is not None:
+                    result.source_id = other_account_data.id
+            else:
+                result.notes = "-"  # The user identification is redundant in this case
+
+                if account_data is not None:
+                    result.source_id = account_data.id
+
+                if other_account_data is not None:
+                    result.destination_id = other_account_data.id
+
         return result
+
+
+class AccountType(str, Enum):
+    asset = "asset"
+    expense = "expense"
+    revenue = "revenue"
+    cash = "cash"
+
+
+@dataclass
+class Account:
+    id: str
+    type: AccountType
 
 
 @lru_cache(maxsize=1)
@@ -122,13 +162,15 @@ def fetch_accounts(client: FireflyClient):
     return response.json()["data"]
 
 
-def find_account_id_by_iban(
+def find_account_by_iban(
     firefly_client: FireflyClient, iban: Optional[str]
-) -> Optional[str]:
+) -> Optional[Account]:
     if iban is not None:
         for account in fetch_accounts(firefly_client):
             if account["attributes"].get("iban") == iban:
-                return account["id"]
+                return Account(
+                    id=account["id"], type=AccountType(account["attributes"]["type"])
+                )
 
 
 def fetch_transactions(client: FioBank, since: Optional[date]):
@@ -160,10 +202,14 @@ def store_transactions(
         except:
             result = response.json()
 
-            if not all(
+            if all(
                 error.lower().startswith("duplicate")
                 for error in flatten(result["errors"].values())
             ):
+                logging.info(
+                    f"Ignoring existing {transaction.type.value} transaction from {transaction.date.isoformat()}"
+                )
+            else:
                 pprint(result)
                 raise
 
@@ -181,11 +227,22 @@ def fetch_last_transaction_date(
 
     data = response.json()["data"]
 
-    if not data:
+    non_transfers = (
+        [
+            it
+            for it in data
+            if it["attributes"]["transactions"][0]["type"]
+            != TransactionType.transfer.value
+        ]
+        if data
+        else None
+    )
+
+    if not non_transfers:
         return None
 
     return datetime.fromisoformat(
-        data[0]["attributes"]["transactions"][0]["date"]
+        non_transfers[0]["attributes"]["transactions"][0]["date"]
     ).date()
 
 
@@ -204,13 +261,14 @@ def main():
     firefly_client = FireflyClient(firefly_url, firefly_token)
 
     account = fio_client.info()
-    account_id = find_account_id_by_iban(firefly_client, account["iban"])
+    account_data = find_account_by_iban(firefly_client, account["iban"])
 
-    if account_id is None:
+    if account_data is None:
         logging.error("Account not found")
         sys.exit(1)
 
-    last_sync_date = fetch_last_transaction_date(firefly_client, account_id)
+    # last_sync_date = fetch_last_transaction_date(firefly_client, account_data.id)
+    last_sync_date = date(2021, 8, 31)
 
     transactions = [
         Transaction.from_fio_data(account, item, firefly_client)

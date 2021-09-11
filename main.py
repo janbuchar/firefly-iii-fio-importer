@@ -87,9 +87,6 @@ class Transaction:
             else TransactionType.deposit
         )
 
-        if type == TransactionType.transfer:
-            pprint(transaction)
-
         result = cls(
             type=type,
             date=transaction["date"],
@@ -267,8 +264,7 @@ def main():
         logging.error("Account not found")
         sys.exit(1)
 
-    # last_sync_date = fetch_last_transaction_date(firefly_client, account_data.id)
-    last_sync_date = date(2021, 8, 31)
+    last_sync_date = fetch_last_transaction_date(firefly_client, account_data.id)
 
     transactions = [
         Transaction.from_fio_data(account, item, firefly_client)

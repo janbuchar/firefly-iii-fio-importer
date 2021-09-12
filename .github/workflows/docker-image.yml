@@ -25,4 +25,4 @@ jobs:
       with:
         context: .
         push: true
-        tags: teyras/firefly-iii-fio-importer:$TAG
+        tags: teyras/firefly-iii-fio-importer:${{ env.TAG }}

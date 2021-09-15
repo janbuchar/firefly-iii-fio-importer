@@ -5,7 +5,6 @@ import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from enum import Enum
-from functools import lru_cache
 from pprint import pprint
 from typing import List, Optional
 from zoneinfo import ZoneInfo
@@ -146,9 +145,17 @@ class Account:
     type: AccountType
 
 
-@lru_cache(maxsize=1)
-def fetch_accounts(client: FireflyClient):
-    response = client.request("get", "accounts")
+def find_account_by_iban(
+    firefly_client: FireflyClient, iban: Optional[str]
+) -> Optional[Account]:
+    if iban is None:
+        return None
+    response = firefly_client.request("get", f"search/accounts?field=iban&query={iban}")
+
+    accounts = response.json()["data"]
+
+    if response.status_code == 404 or len(accounts) == 0:
+        return None
 
     try:
         response.raise_for_status()
@@ -156,18 +163,9 @@ def fetch_accounts(client: FireflyClient):
         pprint(response.json())
         raise
 
-    return response.json()["data"]
-
-
-def find_account_by_iban(
-    firefly_client: FireflyClient, iban: Optional[str]
-) -> Optional[Account]:
-    if iban is not None:
-        for account in fetch_accounts(firefly_client):
-            if account["attributes"].get("iban") == iban:
-                return Account(
-                    id=account["id"], type=AccountType(account["attributes"]["type"])
-                )
+    return Account(
+        id=accounts[0]["id"], type=AccountType(accounts[0]["attributes"]["type"])
+    )
 
 
 def fetch_transactions(client: FioBank, since: Optional[date]):
@@ -261,7 +259,7 @@ def main():
     account_data = find_account_by_iban(firefly_client, account["iban"])
 
     if account_data is None:
-        logging.error("Account not found")
+        logging.error(f"Account '{account['iban']}' not found")
         sys.exit(1)
 
     last_sync_date = fetch_last_transaction_date(firefly_client, account_data.id)

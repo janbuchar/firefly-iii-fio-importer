@@ -250,6 +250,7 @@ def main():
 
     fio_token = os.environ["FIO_TOKEN"]
     fio_client = FioBank(fio_token)
+    fio_client.base_url = "https://fioapi.fio.cz/ib_api/rest/"
 
     firefly_url = os.environ["FIREFLY_URL"]
     firefly_token = os.environ["FIREFLY_TOKEN"]

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from enum import Enum
 from pprint import pprint
+import time
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
@@ -13,7 +14,7 @@ import requests
 from fiobank import FioBank
 from more_itertools import flatten
 from pydantic.json import pydantic_encoder
-from requests.models import Response
+from requests.models import HTTPError, Response
 from schwifty import IBAN
 
 
@@ -169,11 +170,16 @@ def find_account_by_iban(
 
 
 def fetch_transactions(client: FioBank, since: Optional[date]):
-    to_date = datetime.now(ZoneInfo(key="Europe/Prague"))
-    from_date = (
-        (since - timedelta(days=1)) if since else (to_date - timedelta(days=3000))
-    )
-    return client.period(from_date, to_date)
+    now = datetime.now(ZoneInfo(key="Europe/Prague"))
+
+    try:
+        if since:
+            return client.period(since - timedelta(days=1), min(now.date() - timedelta(days=1), since + timedelta(days=180)))
+        else:
+            return client.period(now - timedelta(days=85), now)
+    except HTTPError as e:
+        logging.error(f"Got error response {e.response.status_code}: {e.response.text}")
+        raise
 
 
 def store_transactions(
@@ -186,6 +192,7 @@ def store_transactions(
             data=json.dumps(
                 {
                     "error_if_duplicate_hash": True,
+                    "apply_rules": True,
                     "transactions": [transaction],
                 },
                 default=pydantic_encoder,
@@ -197,7 +204,7 @@ def store_transactions(
         except:
             result = response.json()
 
-            if all(
+            if "errors" in result and all(
                 error.lower().startswith("duplicate")
                 for error in flatten(result["errors"].values())
             ):
@@ -250,7 +257,6 @@ def main():
 
     fio_token = os.environ["FIO_TOKEN"]
     fio_client = FioBank(fio_token)
-    fio_client.base_url = "https://fioapi.fio.cz/ib_api/rest/"
 
     firefly_url = os.environ["FIREFLY_URL"]
     firefly_token = os.environ["FIREFLY_TOKEN"]
@@ -264,6 +270,10 @@ def main():
         sys.exit(1)
 
     last_sync_date = fetch_last_transaction_date(firefly_client, account_data.id)
+
+    logging.info("Waiting for Fio API to cool down")
+    time.sleep(30)
+    logging.info(f"Will fetch transactions since {last_sync_date}")
 
     transactions = [
         Transaction.from_fio_data(account, item, firefly_client)
